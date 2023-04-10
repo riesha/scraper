@@ -1,27 +1,20 @@
 use anyhow::*;
 use async_recursion::async_recursion;
+use itertools::Itertools;
 use reqwest::{Client, Url};
 use select::{document::Document, predicate::Name};
-
-pub async fn get_all_domestic_links(client: &Client, url: Url) -> Result<Vec<String>>
+pub async fn get_all_domestic_links(client: &Client, url: Url) -> Result<Vec<Url>>
 {
     println!("Scraping [{}]...", url.as_str());
     let content = client.get(url).send().await?.text().await?;
     let document = Document::from(content.as_str());
 
-    let mut links: Vec<String> = document
+    let links: Vec<Url> = document
         .find(Name("a"))
-        .filter_map(|lnk| lnk.attr("href").map(|x| x.trim().to_string()))
-        .filter(|lnk| {
-            !lnk.contains("//")
-                && !lnk.contains("javascript:void")
-                && lnk.len() > 1
-                && !lnk.contains(".php")
-        })
+        .filter_map(|lnk| lnk.attr("href").map(|x| Url::parse(x.trim()).ok()))
+        .unique()
+        .filter_map(|url| url)
         .collect();
-
-    links.sort();
-    links.dedup();
 
     if links.is_empty()
     {
@@ -38,13 +31,20 @@ pub async fn scrape_all(
 ) -> Result<()>
 {
     let std::result::Result::Ok(seed_links) = get_all_domestic_links(&client, url.clone()).await else {return Ok(())};
-    let og = url.clone().origin().ascii_serialization();
+    let og = Url::parse(&url.clone().origin().ascii_serialization())?;
 
     let tasks: Vec<_> = seed_links
         .into_iter()
         .map(|lnk| {
             let cl = client.clone();
-            let ur = Url::parse(&og).unwrap().join(&lnk).unwrap();
+            let ur = if lnk.cannot_be_a_base()
+            {
+                og.join(lnk.as_str()).unwrap()
+            }
+            else
+            {
+                lnk
+            };
             if !visited.contains(&ur)
             {
                 println!("new link to visit! {}", ur.as_str());
@@ -64,15 +64,15 @@ pub async fn scrape_all(
 
     if tasks.is_empty()
     {
+        links.sort();
+        links.dedup();
         return Ok(());
     }
     for task in tasks
     {
         let std::result::Result::Ok(task) = &mut task.await? else {continue};
-        links.append(task);
+        links.append(&mut task.iter().map(|x| x.to_string()).collect_vec());
     }
-    links.sort();
-    links.dedup();
 
     scrape_all(client, url, visited, links).await
 }
